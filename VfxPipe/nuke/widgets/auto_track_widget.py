@@ -5,7 +5,21 @@ Provides a Qt-based interface for automated camera tracking in Nuke.
 Allows users to select CameraTracker nodes and configure tracking parameters.
 """
 
-from PySide2 import QtWidgets, QtCore, QtGui
+from VfxPipe.utils.host import getPySideVersion
+
+# Dynamically import correct PySide version based on DCC
+_pyside_version = getPySideVersion()
+
+try:
+    if _pyside_version == 2:
+        from PySide2 import QtWidgets, QtCore, QtGui
+    else:
+        from PySide6 import QtWidgets, QtCore, QtGui
+except ImportError as e:
+    raise ImportError(
+        f"PySide{_pyside_version} is required for this DCC but not available. "
+        f"Please install PySide{_pyside_version}. Error: {e}"
+    )
 
 
 class AutoTrackWidget(QtWidgets.QDialog):
