@@ -7,7 +7,12 @@ Integrates with the Auto Track Widget for user configuration.
 
 import nuke
 import nukescripts
+import time
 from VfxPipe.utils.host import getPySideVersion
+from VfxPipe.utils.logger import getLogger
+
+# Initialize logger
+logger = getLogger("AutoTrack")
 
 # Dynamically import correct PySide version based on DCC
 _pyside_version = getPySideVersion()
@@ -43,24 +48,36 @@ class TrackingWorker(QtCore.QThread):
 
     def run(self):
         """Execute the tracking process."""
+        logger.info("=" * 60)
+        logger.info("AUTO TRACK PROCESS STARTED")
+        logger.info("=" * 60)
+
         try:
             nodes = self.params['nodes']
             total_nodes = len(nodes)
+            logger.info(f"Processing {total_nodes} CameraTracker node(s): {nodes}")
+            logger.info(f"Parameters: {self.params}")
 
             for idx, node_name in enumerate(nodes):
                 if self.cancelled:
+                    logger.warning("Tracking cancelled by user")
                     self.tracking_complete.emit(False, "Tracking cancelled by user")
                     return
 
                 # Calculate progress
                 base_progress = (idx / total_nodes) * 100
+                logger.info(f"\n{'=' * 60}")
+                logger.info(f"Processing node {idx + 1}/{total_nodes}: {node_name}")
+                logger.info(f"{'=' * 60}")
 
                 # Get node
                 try:
                     node = nuke.toNode(node_name)
                     if not node:
                         raise Exception(f"Node '{node_name}' not found")
+                    logger.info(f"Node found: {node.Class()} - {node_name}")
                 except Exception as e:
+                    logger.error(f"Failed to get node '{node_name}': {e}")
                     self.error_occurred.emit("Node Error", str(e))
                     return
 
@@ -72,13 +89,17 @@ class TrackingWorker(QtCore.QThread):
                 )
 
                 try:
+                    start_time = time.time()
                     self._process_camera_tracker(
                         node,
                         node_name,
                         base_progress,
                         100.0 / total_nodes
                     )
+                    elapsed = time.time() - start_time
+                    logger.info(f"Completed {node_name} in {elapsed:.2f} seconds")
                 except Exception as e:
+                    logger.error(f"Error processing {node_name}: {e}", exc_info=True)
                     self.error_occurred.emit(
                         f"Error processing {node_name}",
                         f"Failed to process camera tracker:\n\n{str(e)}"
@@ -86,12 +107,16 @@ class TrackingWorker(QtCore.QThread):
                     return
 
             # Complete
+            logger.info("=" * 60)
+            logger.info(f"AUTO TRACK COMPLETED SUCCESSFULLY - {total_nodes} node(s) processed")
+            logger.info("=" * 60)
             self.tracking_complete.emit(
                 True,
                 f"Successfully processed {total_nodes} camera tracker(s)"
             )
 
         except Exception as e:
+            logger.critical(f"Unexpected error in tracking process: {e}", exc_info=True)
             self.error_occurred.emit("Tracking Error", f"Unexpected error:\n\n{str(e)}")
 
     def _process_camera_tracker(self, node, node_name, base_progress, progress_range):
@@ -104,41 +129,78 @@ class TrackingWorker(QtCore.QThread):
             base_progress: Starting progress percentage
             progress_range: Range of progress this node represents
         """
+        logger.info(f"\n--- Processing CameraTracker: {node_name} ---")
+
         # Show control panel
-        node.showControlPanel()
+        logger.debug("Showing control panel...")
+        nuke.executeInMainThread(node.showControlPanel)
 
         # Get current plate name
         try:
-            plate_name = nuke.tcl(f"full_name [topnode {node.name()}]")
-        except:
+            plate_name = nuke.executeInMainThreadWithResult(
+                lambda: nuke.tcl(f"full_name [topnode {node.name()}]")
+            )
+            logger.info(f"Plate name: {plate_name}")
+        except Exception as e:
+            logger.warning(f"Could not get plate name, using node name: {e}")
             plate_name = node_name
 
         # Track Features
         if self.cancelled:
             return
 
+        logger.info("\n[STEP 1/4] TRACKING FEATURES")
         self.progress_update.emit(
             f"Tracking {node_name}",
             base_progress + (progress_range * 0.2),
             f"Tracking features on plate: {plate_name}"
         )
-        node["trackFeatures"].execute()
+
+        # Execute tracking in main thread (CRITICAL FIX)
+        logger.debug("Executing trackFeatures button...")
+        start_time = time.time()
+        nuke.executeInMainThread(lambda: node["trackFeatures"].execute())
+        elapsed = time.time() - start_time
+
+        # Check track count
+        try:
+            track_count = nuke.executeInMainThreadWithResult(
+                lambda: len(node.knob('tracks').getValue())
+            )
+            logger.info(f"Tracking complete in {elapsed:.2f}s - {track_count} tracks created")
+        except:
+            logger.warning("Could not get track count")
 
         # Solve Camera
         if self.cancelled:
             return
 
+        logger.info("\n[STEP 2/4] SOLVING CAMERA")
         self.progress_update.emit(
             f"Solving {node_name}",
             base_progress + (progress_range * 0.4),
             f"Solving camera for plate: {plate_name}"
         )
-        node["solveCamera"].execute()
+
+        logger.debug("Executing solveCamera button...")
+        start_time = time.time()
+        nuke.executeInMainThread(lambda: node["solveCamera"].execute())
+        elapsed = time.time() - start_time
+
+        # Check initial RMSE
+        try:
+            initial_rmse = nuke.executeInMainThreadWithResult(
+                lambda: node['solveRMSE'].value()
+            )
+            logger.info(f"Camera solved in {elapsed:.2f}s - Initial RMSE: {initial_rmse:.4f}")
+        except:
+            logger.warning("Could not get initial RMSE")
 
         # Recursive update solve
         if self.cancelled:
             return
 
+        logger.info("\n[STEP 3/4] RECURSIVE SOLVE REFINEMENT")
         self.progress_update.emit(
             f"Refining {node_name}",
             base_progress + (progress_range * 0.5),
@@ -156,6 +218,7 @@ class TrackingWorker(QtCore.QThread):
         if self.cancelled:
             return
 
+        logger.info("\n[STEP 4/4] CREATING CAMERA NODE")
         self.progress_update.emit(
             f"Creating camera for {node_name}",
             base_progress + (progress_range * 0.9),
@@ -163,23 +226,40 @@ class TrackingWorker(QtCore.QThread):
         )
 
         # Store current cameras to find the new one
-        cameras_before = set(nuke.allNodes('Camera3'))
+        cameras_before = nuke.executeInMainThreadWithResult(
+            lambda: set(nuke.allNodes('Camera3'))
+        )
+        logger.debug(f"Cameras before: {len(cameras_before)}")
 
-        # Create camera using the enhanced function
-        camera_node = self._create_camera(node)
+        # Create camera using the enhanced function (in main thread)
+        logger.debug("Creating camera node...")
+        start_time = time.time()
+        camera_node = nuke.executeInMainThreadWithResult(
+            lambda: self._create_camera(node)
+        )
+        elapsed = time.time() - start_time
+        logger.info(f"Camera created in {elapsed:.2f}s")
 
         # Find and rename the new camera
-        cameras_after = set(nuke.allNodes('Camera3'))
+        cameras_after = nuke.executeInMainThreadWithResult(
+            lambda: set(nuke.allNodes('Camera3'))
+        )
         new_cameras = cameras_after - cameras_before
+        logger.debug(f"Cameras after: {len(cameras_after)}, New cameras: {len(new_cameras)}")
 
         if new_cameras:
             camera_node = list(new_cameras)[0]
-            camera_node.setName(f"{self.params['camera_prefix']}{plate_name}")
+            final_name = f"{self.params['camera_prefix']}{plate_name}"
+            nuke.executeInMainThread(lambda: camera_node.setName(final_name))
+            logger.info(f"Camera renamed to: {final_name}")
+
             self.progress_update.emit(
                 f"Completed {node_name}",
                 base_progress + progress_range,
-                f"Created camera: {camera_node.name()}"
+                f"Created camera: {final_name}"
             )
+        else:
+            logger.warning("No new camera found after creation!")
 
     def _create_camera(self, solver):
         """
@@ -234,15 +314,27 @@ class TrackingWorker(QtCore.QThread):
         Args:
             cameraTracker: CameraTracker node
         """
-        refFrames = [cameraTracker['trackStart'].value(), cameraTracker['trackStop'].value()]
-        selFrameKnob = cameraTracker.knob('selectedFrames')
-        selFrameKnob.clearAnimated()
-        selFrameKnob.setAnimated()
+        logger.debug("Updating solve...")
 
-        for frame in refFrames:
-            selFrameKnob.setValueAt(frame, frame)
+        # Get reference frames (in main thread)
+        refFrames = nuke.executeInMainThreadWithResult(
+            lambda: [cameraTracker['trackStart'].value(), cameraTracker['trackStop'].value()]
+        )
+        logger.debug(f"Reference frames: {refFrames}")
 
-        cameraTracker.knob("doUpdateSolve").execute()
+        # Update selected frames knob (in main thread)
+        def update_frames():
+            selFrameKnob = cameraTracker.knob('selectedFrames')
+            selFrameKnob.clearAnimated()
+            selFrameKnob.setAnimated()
+            for frame in refFrames:
+                selFrameKnob.setValueAt(frame, frame)
+
+        nuke.executeInMainThread(update_frames)
+
+        # Execute update solve button (in main thread)
+        nuke.executeInMainThread(lambda: cameraTracker.knob("doUpdateSolve").execute())
+        logger.debug("Solve updated")
 
     def _update_solve_recursive(self, node, node_name, base_progress, progress_range):
         """
@@ -261,37 +353,48 @@ class TrackingWorker(QtCore.QThread):
         controlError = params['controlError']
         max_iter = params['max_iter']
 
+        logger.info(f"Starting recursive refinement - Target RMSE: {controlError}, Max iterations: {max_iter}")
+
         iteration = 0
 
-        while node['solveRMSE'].value() >= controlError and iteration < max_iter:
+        current_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
+
+        while current_rmse >= controlError and iteration < max_iter:
             if self.cancelled:
+                logger.info("Recursive refinement cancelled by user")
                 return
 
-            current_rmse = node['solveRMSE'].value()
+            logger.debug(f"Iteration {iteration + 1}/{max_iter} - Current RMSE: {current_rmse:.4f}")
 
-            # Update thresholds
-            node['minLengthThreshold'].setValue(minLen)
-            node['maxRMSEThreshold'].setValue(maxTrackError)
-            node['maxErrorThreshold'].setValue(maxError)
+            # Update thresholds (in main thread)
+            nuke.executeInMainThread(lambda: node['minLengthThreshold'].setValue(minLen))
+            nuke.executeInMainThread(lambda: node['maxRMSEThreshold'].setValue(maxTrackError))
+            nuke.executeInMainThread(lambda: node['maxErrorThreshold'].setValue(maxError))
+            logger.debug(f"Set thresholds - minLen: {minLen}, maxTrackError: {maxTrackError:.2f}, maxError: {maxError:.2f}")
 
             # Delete rejected tracks
-            node['deleteRejectedTracks'].setValue(
+            nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].setValue(
                 "cameraTracker = nuke.thisNode()\n"
                 "cameraTracker['proceedWithUpdate'].setValue(True)"
-            )
-            node['deleteRejectedTracks'].execute()
+            ))
+            nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].execute())
+            logger.debug("Deleted rejected tracks")
 
             # Delete invalid tracks
-            node['deleteInvalidTracks'].setValue(
+            nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].setValue(
                 "cameraTracker = nuke.thisNode()\n"
                 "cameraTracker['proceedWithUpdate'].setValue(True)"
-            )
-            node['deleteInvalidTracks'].execute()
+            ))
+            nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].execute())
+            logger.debug("Deleted invalid tracks")
 
             # Update solve
             self._update_solve(node)
 
-            new_rmse = node['solveRMSE'].value()
+            new_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
+            improvement = current_rmse - new_rmse
+
+            logger.info(f"Iteration {iteration + 1} complete - RMSE: {current_rmse:.4f} → {new_rmse:.4f} (Δ {improvement:.4f})")
 
             # Update progress
             iter_progress = base_progress + (iteration / max_iter) * progress_range
@@ -313,13 +416,19 @@ class TrackingWorker(QtCore.QThread):
             maxTrackError -= 0.25
             maxError -= 0.25
             iteration += 1
+            current_rmse = new_rmse
 
         # Final status
-        final_rmse = node['solveRMSE'].value()
+        final_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
         final_detail = (
             f"Refinement complete after {iteration} iteration(s) | "
             f"Final RMSE: {final_rmse:.4f}"
         )
+
+        if final_rmse < controlError:
+            logger.info(f"✓ Target RMSE achieved: {final_rmse:.4f} < {controlError:.4f}")
+        else:
+            logger.warning(f"Target RMSE not achieved: {final_rmse:.4f} >= {controlError:.4f} (max iterations reached)")
 
         self.progress_update.emit(
             f"Refining {node_name}",
