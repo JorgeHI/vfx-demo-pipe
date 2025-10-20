@@ -10,6 +10,7 @@ import nukescripts
 import time
 from VfxPipe.utils.host import getPySideVersion
 from VfxPipe.utils.logger import getLogger
+from ticketSubmitter import submit_ticket
 
 # Initialize logger
 logger = getLogger("AutoTrack")
@@ -100,6 +101,26 @@ class TrackingWorker(QtCore.QThread):
                     logger.info(f"Completed {node_name} in {elapsed:.2f} seconds")
                 except Exception as e:
                     logger.error(f"Error processing {node_name}: {e}", exc_info=True)
+
+                    # Submit ticket (must run in main thread for UI)
+                    try:
+                        # Capture variables by value for lambda
+                        ctx = {
+                            "node_name": node_name,
+                            "node_class": node.Class() if 'node' in locals() and node else "N/A",
+                            "processing_step": "camera_tracker_processing",
+                            "total_nodes": total_nodes,
+                            "current_node_index": idx + 1,
+                            "params": self.params
+                        }
+                        nuke.executeInMainThread(lambda exc=e, context=ctx: submit_ticket(
+                            exception=exc,
+                            context=context,
+                            show_ui=True
+                        ))
+                    except Exception as ticket_err:
+                        logger.error(f"Failed to submit ticket: {ticket_err}", exc_info=True)
+
                     self.error_occurred.emit(
                         f"Error processing {node_name}",
                         f"Failed to process camera tracker:\n\n{str(e)}"
@@ -117,6 +138,24 @@ class TrackingWorker(QtCore.QThread):
 
         except Exception as e:
             logger.critical(f"Unexpected error in tracking process: {e}", exc_info=True)
+
+            # Submit ticket (must run in main thread for UI)
+            try:
+                # Capture variables by value for lambda
+                ctx = {
+                    "processing_step": "main_tracking_loop",
+                    "total_nodes": total_nodes if 'total_nodes' in locals() else "N/A",
+                    "nodes": nodes if 'nodes' in locals() else "N/A",
+                    "params": self.params
+                }
+                nuke.executeInMainThread(lambda exc=e, context=ctx: submit_ticket(
+                    exception=exc,
+                    context=context,
+                    show_ui=True
+                ))
+            except Exception as ticket_err:
+                logger.error(f"Failed to submit ticket: {ticket_err}", exc_info=True)
+
             self.error_occurred.emit("Tracking Error", f"Unexpected error:\n\n{str(e)}")
 
     def _process_camera_tracker(self, node, node_name, base_progress, progress_range):
@@ -271,41 +310,47 @@ class TrackingWorker(QtCore.QThread):
         Returns:
             Created Camera node
         """
-        x = solver.xpos()
-        y = solver.ypos()
-        w = solver.screenWidth()
-        h = solver.screenHeight()
-        m = int(x + w/2)
-        numviews = len(nuke.views())
+        try:
+            x = solver.xpos()
+            y = solver.ypos()
+            w = solver.screenWidth()
+            h = solver.screenHeight()
+            m = int(x + w/2)
+            numviews = len(nuke.views())
 
-        # Use link setting from params
-        link = self.params['link_output']
+            # Use link setting from params
+            link = self.params['link_output']
 
-        camera = nuke.createNode('Camera', '', False)
-        camera.setInput(0, None)
-        camera.setXYpos(m - int(camera.screenWidth()/2), y + w)
+            camera = nuke.createNode('Camera', '', False)
+            camera.setInput(0, None)
+            camera.setXYpos(m - int(camera.screenWidth()/2), y + w)
 
-        if link:
-            # Link with expressions
-            camera.knob("focal").setExpression(solver.name() + ".focalLength")
-            camera.knob("haperture").setExpression(solver.name() + ".aperture.x")
-            camera.knob("vaperture").setExpression(solver.name() + ".aperture.y")
-            camera.knob("translate").setExpression(solver.name() + ".camTranslate")
-            camera.knob("rotate").setExpression(solver.name() + ".camRotate")
-            camera.knob("win_translate").setExpression(solver.name() + ".windowTranslate")
-            camera.knob("win_scale").setExpression(solver.name() + ".windowScale")
-        else:
-            # Bake values
-            camera.knob("focal").fromScript(solver.knob("focalLength").toScript(False))
-            camera.knob("translate").fromScript(solver.knob("camTranslate").toScript(False))
-            camera.knob("rotate").fromScript(solver.knob("camRotate").toScript(False))
-            camera.knob("win_translate").fromScript(solver.knob("windowTranslate").toScript(False))
-            camera.knob("win_scale").fromScript(solver.knob("windowScale").toScript(False))
-            for i in range(numviews):
-                camera.knob("haperture").setValue(solver.knob("aperture").getValue(0, i+1), 0, 0, i+1)
-                camera.knob("vaperture").setValue(solver.knob("aperture").getValue(1, i+1), 0, 0, i+1)
+            if link:
+                # Link with expressions
+                camera.knob("focal").setExpression(solver.name() + ".focalLength")
+                camera.knob("haperture").setExpression(solver.name() + ".aperture.x")
+                camera.knob("vaperture").setExpression(solver.name() + ".aperture.y")
+                camera.knob("translate").setExpression(solver.name() + ".camTranslate")
+                camera.knob("rotate").setExpression(solver.name() + ".camRotate")
+                camera.knob("win_translate").setExpression(solver.name() + ".windowTranslate")
+                camera.knob("win_scale").setExpression(solver.name() + ".windowScale")
+            else:
+                # Bake values
+                camera.knob("focal").fromScript(solver.knob("focalLength").toScript(False))
+                camera.knob("translate").fromScript(solver.knob("camTranslate").toScript(False))
+                camera.knob("rotate").fromScript(solver.knob("camRotate").toScript(False))
+                camera.knob("win_translate").fromScript(solver.knob("windowTranslate").toScript(False))
+                camera.knob("win_scale").fromScript(solver.knob("windowScale").toScript(False))
+                for i in range(numviews):
+                    camera.knob("haperture").setValue(solver.knob("aperture").getValue(0, i+1), 0, 0, i+1)
+                    camera.knob("vaperture").setValue(solver.knob("aperture").getValue(1, i+1), 0, 0, i+1)
 
-        return camera
+            return camera
+
+        except Exception as e:
+            logger.error(f"Failed to create camera from solver '{solver.name()}': {e}", exc_info=True)
+            # Re-raise to be caught by outer handler (which will submit ticket)
+            raise
 
     def _update_solve(self, cameraTracker):
         """
@@ -357,84 +402,90 @@ class TrackingWorker(QtCore.QThread):
 
         iteration = 0
 
-        current_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
+        try:
+            current_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
 
-        while current_rmse >= controlError and iteration < max_iter:
-            if self.cancelled:
-                logger.info("Recursive refinement cancelled by user")
-                return
+            while current_rmse >= controlError and iteration < max_iter:
+                if self.cancelled:
+                    logger.info("Recursive refinement cancelled by user")
+                    return
 
-            logger.debug(f"Iteration {iteration + 1}/{max_iter} - Current RMSE: {current_rmse:.4f}")
+                logger.debug(f"Iteration {iteration + 1}/{max_iter} - Current RMSE: {current_rmse:.4f}")
 
-            # Update thresholds (in main thread)
-            nuke.executeInMainThread(lambda: node['minLengthThreshold'].setValue(minLen))
-            nuke.executeInMainThread(lambda: node['maxRMSEThreshold'].setValue(maxTrackError))
-            nuke.executeInMainThread(lambda: node['maxErrorThreshold'].setValue(maxError))
-            logger.debug(f"Set thresholds - minLen: {minLen}, maxTrackError: {maxTrackError:.2f}, maxError: {maxError:.2f}")
+                # Update thresholds (in main thread)
+                nuke.executeInMainThread(lambda: node['minLengthThreshold'].setValue(minLen))
+                nuke.executeInMainThread(lambda: node['maxRMSEThreshold'].setValue(maxTrackError))
+                nuke.executeInMainThread(lambda: node['maxErrorThreshold'].setValue(maxError))
+                logger.debug(f"Set thresholds - minLen: {minLen}, maxTrackError: {maxTrackError:.2f}, maxError: {maxError:.2f}")
 
-            # Delete rejected tracks
-            nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].setValue(
-                "cameraTracker = nuke.thisNode()\n"
-                "cameraTracker['proceedWithUpdate'].setValue(True)"
-            ))
-            nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].execute())
-            logger.debug("Deleted rejected tracks")
+                # Delete rejected tracks
+                nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].setValue(
+                    "cameraTracker = nuke.thisNode()\n"
+                    "cameraTracker['proceedWithUpdate'].setValue(True)"
+                ))
+                nuke.executeInMainThread(lambda: node['deleteRejectedTracks'].execute())
+                logger.debug("Deleted rejected tracks")
 
-            # Delete invalid tracks
-            nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].setValue(
-                "cameraTracker = nuke.thisNode()\n"
-                "cameraTracker['proceedWithUpdate'].setValue(True)"
-            ))
-            nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].execute())
-            logger.debug("Deleted invalid tracks")
+                # Delete invalid tracks
+                nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].setValue(
+                    "cameraTracker = nuke.thisNode()\n"
+                    "cameraTracker['proceedWithUpdate'].setValue(True)"
+                ))
+                nuke.executeInMainThread(lambda: node['deleteInvalidTracks'].execute())
+                logger.debug("Deleted invalid tracks")
 
-            # Update solve
-            self._update_solve(node)
+                # Update solve
+                self._update_solve(node)
 
-            new_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
-            improvement = current_rmse - new_rmse
+                new_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
+                improvement = current_rmse - new_rmse
 
-            logger.info(f"Iteration {iteration + 1} complete - RMSE: {current_rmse:.4f} → {new_rmse:.4f} (Δ {improvement:.4f})")
+                logger.info(f"Iteration {iteration + 1} complete - RMSE: {current_rmse:.4f} → {new_rmse:.4f} (Δ {improvement:.4f})")
 
-            # Update progress
-            iter_progress = base_progress + (iteration / max_iter) * progress_range
-            detail = (
-                f"Iteration {iteration + 1}/{max_iter} | "
-                f"RMSE: {current_rmse:.4f} → {new_rmse:.4f} | "
-                f"Target: {controlError:.4f} | "
-                f"MinLen: {minLen}, MaxError: {maxError:.2f}"
+                # Update progress
+                iter_progress = base_progress + (iteration / max_iter) * progress_range
+                detail = (
+                    f"Iteration {iteration + 1}/{max_iter} | "
+                    f"RMSE: {current_rmse:.4f} → {new_rmse:.4f} | "
+                    f"Target: {controlError:.4f} | "
+                    f"MinLen: {minLen}, MaxError: {maxError:.2f}"
+                )
+
+                self.progress_update.emit(
+                    f"Refining {node_name}",
+                    iter_progress,
+                    detail
+                )
+
+                # Adjust parameters for next iteration
+                minLen += 1
+                maxTrackError -= 0.25
+                maxError -= 0.25
+                iteration += 1
+                current_rmse = new_rmse
+
+            # Final status
+            final_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
+            final_detail = (
+                f"Refinement complete after {iteration} iteration(s) | "
+                f"Final RMSE: {final_rmse:.4f}"
             )
+
+            if final_rmse < controlError:
+                logger.info(f"✓ Target RMSE achieved: {final_rmse:.4f} < {controlError:.4f}")
+            else:
+                logger.warning(f"Target RMSE not achieved: {final_rmse:.4f} >= {controlError:.4f} (max iterations reached)")
 
             self.progress_update.emit(
                 f"Refining {node_name}",
-                iter_progress,
-                detail
+                base_progress + progress_range,
+                final_detail
             )
 
-            # Adjust parameters for next iteration
-            minLen += 1
-            maxTrackError -= 0.25
-            maxError -= 0.25
-            iteration += 1
-            current_rmse = new_rmse
-
-        # Final status
-        final_rmse = nuke.executeInMainThreadWithResult(lambda: node['solveRMSE'].value())
-        final_detail = (
-            f"Refinement complete after {iteration} iteration(s) | "
-            f"Final RMSE: {final_rmse:.4f}"
-        )
-
-        if final_rmse < controlError:
-            logger.info(f"✓ Target RMSE achieved: {final_rmse:.4f} < {controlError:.4f}")
-        else:
-            logger.warning(f"Target RMSE not achieved: {final_rmse:.4f} >= {controlError:.4f} (max iterations reached)")
-
-        self.progress_update.emit(
-            f"Refining {node_name}",
-            base_progress + progress_range,
-            final_detail
-        )
+        except Exception as e:
+            logger.error(f"Recursive solve refinement failed for {node_name}: {e}", exc_info=True)
+            # Re-raise to be caught by outer handler (which will submit ticket)
+            raise
 
     def cancel(self):
         """Cancel the tracking operation."""
@@ -480,16 +531,34 @@ def _on_start_tracking(params):
     """
     global _worker
 
-    # Create and start worker thread
-    _worker = TrackingWorker(params)
+    try:
+        # Create and start worker thread
+        _worker = TrackingWorker(params)
 
-    # Connect worker signals to widget
-    _worker.progress_update.connect(_widget.update_status)
-    _worker.tracking_complete.connect(_widget.tracking_complete)
-    _worker.error_occurred.connect(_widget.show_error)
+        # Connect worker signals to widget
+        _worker.progress_update.connect(_widget.update_status)
+        _worker.tracking_complete.connect(_widget.tracking_complete)
+        _worker.error_occurred.connect(_widget.show_error)
 
-    # Start processing
-    _worker.start()
+        # Start processing
+        _worker.start()
+
+    except Exception as e:
+        logger.error(f"Failed to start tracking worker: {e}", exc_info=True)
+
+        # Submit ticket
+        submit_ticket(
+            exception=e,
+            context={
+                "processing_step": "worker_initialization",
+                "params": params
+            },
+            show_ui=True
+        )
+
+        # Show error to user via widget
+        if _widget:
+            _widget.show_error("Startup Error", f"Failed to start tracking:\n\n{str(e)}")
 
 
 def _on_cancel_tracking():

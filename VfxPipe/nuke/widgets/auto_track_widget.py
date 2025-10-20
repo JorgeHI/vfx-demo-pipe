@@ -205,7 +205,8 @@ class AutoTrackWidget(QtWidgets.QDialog):
             import nuke
 
             # Get selected CameraTracker nodes
-            selected_nodes = [n for n in nuke.selectedNodes() if n.Class() == 'CameraTracker']
+            # BUG: No type validation! This will allow any node type to be processed
+            selected_nodes = [n for n in nuke.selectedNodes()]
 
             # Clear table
             self.node_table.setRowCount(0)
