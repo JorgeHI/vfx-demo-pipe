@@ -239,6 +239,13 @@ class AutoTrackWidget(QtWidgets.QDialog):
                     plate_name = nuke.tcl(f"full_name [topnode {node.name()}]")
                 except:
                     plate_name = "Unknown"
+
+                # Access CameraTracker-specific knobs WITHOUT checking node type first
+                # This will FAIL if node is not a CameraTracker!
+                track_count = len(node.knob('tracks').getValue())
+                focal_length = node['focalLength'].value()
+                plate_name = f"{plate_name} (Tracks: {track_count})"
+
                 plate_item = QtWidgets.QTableWidgetItem(plate_name)
                 self.node_table.setItem(row, 2, plate_item)
 
@@ -246,8 +253,6 @@ class AutoTrackWidget(QtWidgets.QDialog):
 
         except ImportError:
             self.status_label.setText("Error: Nuke not available")
-        except Exception as e:
-            self.status_label.setText(f"Error refreshing nodes: {str(e)}")
 
     def _select_all_nodes(self):
         """Check all node checkboxes."""
